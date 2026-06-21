@@ -19,17 +19,26 @@ logging.getLogger("prophet").setLevel(logging.WARNING)
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
 
 
-def _build_model() -> Prophet:
+# Weekly seasonality only becomes identifiable after ~4 weeks. Below that it
+# overfits short noisy series and drags the forecast off the last price level —
+# the source of the observed ~25% low bias on early data.
+WEEKLY_SEASONALITY_MIN_DAYS = 28
+
+
+def _build_model(n_obs: int) -> Prophet:
     """
-    Daily TCG prices: weekly seasonality is plausible (weekend buying),
-    yearly only matters with >1yr history (Prophet auto-disables if short).
-    multiplicative seasonality suits prices that swing proportionally to level.
+    Daily TCG prices. Kept deliberately conservative on short history:
+      - weekly seasonality only once we have ~4 weeks (else it overfits and
+        biases the forecast low),
+      - yearly off (never enough data at this horizon),
+      - ADDITIVE, not multiplicative: multiplicative amplified short-series
+        seasonal swings and pushed the forecast well below the last actual.
     """
     return Prophet(
-        weekly_seasonality=True,
-        yearly_seasonality="auto",
+        weekly_seasonality=(n_obs >= WEEKLY_SEASONALITY_MIN_DAYS),
+        yearly_seasonality=False,
         daily_seasonality=False,
-        seasonality_mode="multiplicative",
+        seasonality_mode="additive",
         interval_width=0.80,  # 80% prediction interval -> lower/upper bounds
     )
 
@@ -42,7 +51,7 @@ def fit_forecast(series: pd.DataFrame, horizon: int = FORECAST_HORIZON_DAYS) -> 
         ds, yhat, yhat_lower, yhat_upper
     Negative forecasts are clipped to 0 (a price can't be negative).
     """
-    model = _build_model()
+    model = _build_model(len(series))
     model.fit(series)
 
     future = model.make_future_dataframe(periods=horizon, freq="D")

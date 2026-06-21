@@ -188,14 +188,24 @@ def save_predictions(rows: list[dict]):
 
 
 def load_model_predictions(card_id: int, exclude_ensemble: bool = True) -> pd.DataFrame:
-    """Read back per-model predictions for one card so the ensemble can combine them."""
+    """Read back per-model predictions for one card so the ensemble can combine them.
+
+    Only FUTURE-dated rows (predict_date >= CURRENT_DATE) are returned. As the
+    7-day window slides forward each run, old per-model rows for past dates are
+    orphaned (the upsert only overwrites the same date). Without this filter the
+    ensemble would re-blend those stale rows and re-stamp them with today's
+    generated_at, filling the table with fresh-looking forecasts for dates that
+    have already passed.
+    """
     clause = "AND model_used <> 'ensemble'" if exclude_ensemble else ""
     sql = text(
         f"""
         SELECT card_id, price_field, predict_date,
                predicted_value, lower_bound, upper_bound, model_used
         FROM {PREDICTIONS_TABLE_FQ}
-        WHERE card_id = :cid {clause}
+        WHERE card_id = :cid
+          AND predict_date >= CURRENT_DATE
+          {clause}
         """
     )
     with get_engine().connect() as conn:

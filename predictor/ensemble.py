@@ -38,15 +38,23 @@ def _model_weights(scores: dict[str, float] | None, models: list[str]) -> dict[s
     """
     if not scores:
         w = {m: 1.0 for m in models}
-    else:
-        w = {}
-        for m in models:
-            mape = scores.get(m)
-            if mape is None or not np.isfinite(mape):
-                # model present but un-scored -> give it the average-ish weight
-                w[m] = 1.0
-            else:
-                w[m] = 1.0 / (mape + EPS)
+        total = sum(w.values()) or 1.0
+        return {m: v / total for m, v in w.items()}
+
+    w = {}
+    scored = []
+    for m in models:
+        mape = scores.get(m)
+        if mape is not None and np.isfinite(mape):
+            w[m] = 1.0 / (mape + EPS)
+            scored.append(w[m])
+    # Un-validated models (no/invalid backtest) get the WORST scored weight, not
+    # a fixed 1.0. MAPE is on a percent scale, so 1/(mape+eps) is ~0.02-0.5 while
+    # the old 1.0 fallback was larger than every real weight -> unproven models
+    # silently dominated the blend. Treating them as worst-case fixes that.
+    fallback = min(scored) if scored else 1.0
+    for m in models:
+        w.setdefault(m, fallback)
     total = sum(w.values()) or 1.0
     return {m: v / total for m, v in w.items()}
 
@@ -82,9 +90,12 @@ def ensemble_for_card(
         lower = float(np.sum(w * lo_m) / wsum)
         upper = float(np.sum(w * hi_m) / wsum)
 
-        # widen the band to also cover model disagreement on the point estimate
-        lower = min(lower, float(np.min(yhat_m)))
-        upper = max(upper, float(np.max(yhat_m)))
+        # Widen for model disagreement, but WEIGHT it: a low-weight (poor) model
+        # barely moves the band. The old raw min/max of point estimates let the
+        # two worst models (biased Prophet, runaway XGBoost) define the interval.
+        disagree = float(np.sqrt(np.sum(w * (yhat_m - yhat) ** 2) / wsum))
+        lower = min(lower, yhat - 1.28 * disagree)  # ~80%
+        upper = max(upper, yhat + 1.28 * disagree)
 
         rows.append(
             {

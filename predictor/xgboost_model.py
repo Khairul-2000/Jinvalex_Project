@@ -36,6 +36,10 @@ MODEL_PATH = os.environ.get(
 # Stable integer code per price field so the model can tell series apart.
 FIELD_CODE = {f: i for i, f in enumerate(PRICE_FIELDS)}
 
+# Cap each recursive step's move vs the previous day so fed-back predictions
+# can't compound into a runaway trend (mirrors Monte Carlo's MAX_DAILY_DRIFT).
+MAX_DAILY_STEP = 0.10  # +/-10% per day
+
 
 def _new_model() -> XGBRegressor:
     return XGBRegressor(
@@ -180,6 +184,13 @@ def forecast_series(
             return None
         yhat = float(model.predict(feat)[0])
         yhat = max(yhat, 0.0)
+        # Clamp the per-step move vs the previous value. A global recursive model
+        # otherwise extrapolates its own nudge into a compounding runaway
+        # (observed: +42% over 7 days); this bounds each day to +/-MAX_DAILY_STEP.
+        prev = hist_y[-1]
+        if prev > 0:
+            lo, hi = prev * (1 - MAX_DAILY_STEP), prev * (1 + MAX_DAILY_STEP)
+            yhat = min(max(yhat, lo), hi)
         # widen the band as we step further out (uncertainty compounds).
         band = sigma * np.sqrt(step) * 1.28  # ~80% if changes ~normal
         preds.append(
